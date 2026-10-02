@@ -20,6 +20,29 @@ describe('engine health domain', () => {
     expect(assessment.dataQuality.usableSamples).toBeGreaterThan(0);
   });
 
+  it('refuses to assess when no sample survives validation', () => {
+    const rows = createDemoTelemetry().map((item, index) => index % 2 === 0
+      ? { ...item, exhaustGasTemp: 900 }
+      : { ...item, vibration: Number.NaN });
+    expect(validateTelemetry(rows).accepted).toHaveLength(0);
+    expect(() => assessEngine(demoEngine, rows, demoModels[1])).toThrowError('no_usable_telemetry');
+  });
+
+  it('assesses partially valid telemetry with reduced data quality', () => {
+    const rows = createDemoTelemetry();
+    rows.push({ ...rows[0], timestamp: '2026-09-30T20:00:00.000Z', exhaustGasTemp: 900 });
+    const assessment = assessEngine(demoEngine, rows, demoModels[1]);
+    expect(assessment.dataQuality.usableSamples).toBe(rows.length - 1);
+    expect(assessment.dataQuality.rejectedSamples).toBe(1);
+    expect(assessment.dataQuality.score).toBeLessThan(100);
+  });
+
+  it('refuses to predict from an assessment without usable samples', () => {
+    const assessment = assessEngine(demoEngine, createDemoTelemetry(), demoModels[1]);
+    const bogus = { ...assessment, dataQuality: { ...assessment.dataQuality, usableSamples: 0 } };
+    expect(() => predictRul(demoEngine, bogus, 240, demoModels[1])).toThrowError('no_usable_telemetry');
+  });
+
   it('predicts a remaining life interval with evidence', () => {
     const assessment = assessEngine(demoEngine, createDemoTelemetry(), demoModels[1]);
     const prediction = predictRul(demoEngine, assessment, 240, demoModels[1]);

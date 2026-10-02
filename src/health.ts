@@ -4,6 +4,7 @@ const limits = { exhaustGasTemp: 760, vibration: 3.2, oilPressureMin: 3.1, fuelF
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
 const round = (value: number, digits = 2) => Number(value.toFixed(digits));
 const statusFor = (score: number): EngineStatus => score >= 85 ? 'healthy' : score >= 70 ? 'watch' : score >= 50 ? 'degraded' : 'critical';
+const fail = (message: string, statusCode = 422): never => { const error = new Error(message); (error as Error & { statusCode: number }).statusCode = statusCode; throw error; };
 
 export function validateTelemetry(samples: TelemetrySample[]): { accepted: TelemetrySample[]; rejected: TelemetrySample[]; anomalies: Anomaly[] } {
   const accepted: TelemetrySample[] = [], rejected: TelemetrySample[] = [], anomalies: Anomaly[] = [];
@@ -31,6 +32,7 @@ function slope(values: number[]): number { if (values.length < 2) return 0; cons
 
 export function assessEngine(engine: Engine, samples: TelemetrySample[], model: ModelVersion, maintenanceCount = 0): HealthAssessment {
   const checked = validateTelemetry(samples); const usable = checked.accepted;
+  if (!usable.length) fail('no_usable_telemetry');
   const temps = usable.map(normalizedTemperature); const fuel = usable.map(item => item.fuelFlow / Math.max(item.thrust, 1)); const vibration = usable.map(item => item.vibration); const oil = usable.map(item => item.oilPressure);
   const temperatureRisk = clamp(((Math.max(...temps, 0) - 620) / 105) * 100); const fuelRisk = clamp(((Math.max(...fuel, 0) - 5.6) / 1.1) * 100); const vibrationRisk = clamp(((Math.max(...vibration, 0) - 1.2) / 2.2) * 100); const oilRisk = clamp(((4.6 - Math.min(...oil, 4.6)) / 1.4) * 100); const degradationSlope = slope(usable.map(item => item.vibration)) + Math.max(0, slope(temps) / 50);
   const degradationRisk = clamp(degradationSlope * 42 + maintenanceCount * 2);
@@ -46,6 +48,7 @@ export function assessEngine(engine: Engine, samples: TelemetrySample[], model: 
 }
 
 export function predictRul(engine: Engine, assessment: HealthAssessment, horizonCycles: number, model: ModelVersion): RulPrediction {
+  if (!assessment.dataQuality.usableSamples) fail('no_usable_telemetry');
   const leading = [...assessment.componentRisks].sort((a, b) => a.estimatedCyclesToLimit - b.estimatedCyclesToLimit)[0]; const base = Math.max(24, Math.min(horizonCycles, Math.round(leading.estimatedCyclesToLimit * (.82 + assessment.healthScore / 500)))); const confidence = round(clamp(55 + assessment.dataQuality.score * .35 - assessment.anomalies.length * 2, 15, 96)); const lowerBound = Math.max(1, Math.round(base * (1 - (100 - confidence) / 220))); const upperBound = Math.round(base * (1 + (100 - confidence) / 160)); const riskByHorizon = [0, .25, .5, .75, 1].map((ratio) => ({ cycle: Math.round(base * ratio), healthScore: round(Math.max(0, assessment.healthScore - ratio * (assessment.healthScore - 38))), probabilityOfMaintenance: round(clamp(.08 + ratio * ratio * .82 + (100 - confidence) / 220, 0, .99), 3) })); return { predictionId: `RUL-${Date.now()}`, engineId: engine.id, modelVersion: model.id, createdAt: new Date().toISOString(), horizonCycles, estimatedRemainingCycles: base, confidence, lowerBound, upperBound, limitingComponent: leading.component, riskByHorizon, evidence: [`${leading.component} 为当前最短部件寿命估计`, `健康评分 ${assessment.healthScore}，数据质量 ${assessment.dataQuality.score}`, `模型 ${model.label} 结合退化斜率与维修历史进行估算`] };
 }
 
